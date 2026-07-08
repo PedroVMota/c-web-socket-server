@@ -1,0 +1,4 @@
+chat-server
+unit-tests
+*.o
+*.log
