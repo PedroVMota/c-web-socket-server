@@ -1,4 +1,4 @@
-name: Docker image
+name: Release and publish image
 
 on:
   push:
@@ -8,8 +8,17 @@ on:
       - origin
   workflow_dispatch:
     inputs:
+      version_bump:
+        description: Semantic version segment to bump
+        required: false
+        default: minor
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
       skip_tests:
-        description: Skip unit tests before publishing
+        description: Skip unit tests before releasing
         required: false
         default: false
         type: boolean
@@ -18,9 +27,13 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
-    if: "${{ (github.event_name == 'workflow_dispatch' && !inputs.skip_tests) || (github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'ci: bump image version')) }}"
+    if: "${{ (github.event_name == 'workflow_dispatch' && !inputs.skip_tests) || (github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'ci: release v')) }}"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -29,25 +42,34 @@ jobs:
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y build-essential
 
-      - name: Run unit tests
-        run: make test
+      - name: Build and test
+        run: make clean && make test && make
 
   version:
+    name: Version and tag
     runs-on: ubuntu-latest
     needs: test
-    if: "${{ always() && (github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'ci: bump image version')) && (needs.test.result == 'success' || needs.test.result == 'skipped') }}"
+    if: "${{ always() && (github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'ci: release v')) && (needs.test.result == 'success' || needs.test.result == 'skipped') }}"
     outputs:
       version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+      sha: ${{ steps.bump.outputs.sha }}
+      image: ${{ steps.bump.outputs.image }}
     steps:
-      - name: Checkout
+      - name: Checkout release branch
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.ref_name }}
 
-      - name: Bump minor version
+      - name: Bump version and update manifests
         id: bump
+        shell: bash
         run: |
           set -euo pipefail
+
+          git pull --rebase origin "${GITHUB_REF_NAME}"
 
           current_version="$(tr -d '[:space:]' < VERSION)"
           if [[ ! "$current_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
@@ -57,34 +79,61 @@ jobs:
 
           major="${BASH_REMATCH[1]}"
           minor="${BASH_REMATCH[2]}"
-          next_version="${major}.$((minor + 1)).0"
-          image="ghcr.io/${GITHUB_REPOSITORY,,}:${next_version}"
+          patch="${BASH_REMATCH[3]}"
+          bump="${{ inputs.version_bump || 'minor' }}"
 
+          case "$bump" in
+            major)
+              next_version="$((major + 1)).0.0"
+              ;;
+            minor)
+              next_version="${major}.$((minor + 1)).0"
+              ;;
+            patch)
+              next_version="${major}.${minor}.$((patch + 1))"
+              ;;
+            *)
+              echo "Invalid version bump: $bump" >&2
+              exit 1
+              ;;
+          esac
+
+          tag="v${next_version}"
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "Tag already exists: $tag" >&2
+            exit 1
+          fi
+
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
           printf '%s\n' "$next_version" > VERSION
-          sed -i -E "s#image: ghcr.io/[^[:space:]]+#image: ${image}#" infra/manifests/deployment.yaml
-
-          echo "version=$next_version" >> "$GITHUB_OUTPUT"
-
-      - name: Commit version bump
-        run: |
-          set -euo pipefail
+          sed -i -E "s#image: ghcr.io/[^[:space:]]+#image: ${image}:${next_version}#" infra/manifests/deployment.yaml
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add VERSION infra/manifests/deployment.yaml
-          git commit -m "ci: bump image version to ${{ steps.bump.outputs.version }}"
-          git pull --rebase origin "${GITHUB_REF_NAME}"
-          git push
+          git commit -m "ci: release ${tag} [skip ci]"
+          git tag -a "$tag" -m "Release ${tag}"
+          git push origin "HEAD:${GITHUB_REF_NAME}" "$tag"
+
+          {
+            echo "version=$next_version"
+            echo "tag=$tag"
+            echo "sha=$(git rev-parse HEAD)"
+            echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
 
   publish:
+    name: Build and publish Docker image
     runs-on: ubuntu-latest
-    if: "${{ always() && (github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'ci: bump image version')) && (needs.test.result == 'success' || needs.test.result == 'skipped') && needs.version.result == 'success' }}"
     needs:
       - test
       - version
+    if: "${{ always() && needs.version.result == 'success' && (needs.test.result == 'success' || needs.test.result == 'skipped') }}"
     steps:
-      - name: Checkout
+      - name: Checkout released source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -96,14 +145,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Prepare image name
-        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.version }}
-            ghcr.io/${{ env.IMAGE_NAME }}:latest
+            ${{ needs.version.outputs.image }}:${{ needs.version.outputs.version }}
+            ${{ needs.version.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.version.outputs.sha }}
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+          provenance: true
+          sbom: true
+
+  release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    needs:
+      - version
+      - publish
+    if: "${{ needs.version.result == 'success' && needs.publish.result == 'success' }}"
+    steps:
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+          IMAGE: ${{ needs.version.outputs.image }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --notes "Docker image: ${IMAGE}:${VERSION}"

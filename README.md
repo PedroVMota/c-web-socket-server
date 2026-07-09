@@ -53,11 +53,24 @@ docker build -t socket-server:latest .
 docker run --rm -p 5555:5555 socket-server:latest
 ```
 
-The GitHub Actions workflow publishes:
+The GitHub Actions release workflow:
+
+1. Runs `make clean && make test && make`.
+2. Bumps `VERSION`.
+3. Updates `infra/manifests/deployment.yaml` to the new image tag.
+4. Commits the version bump and creates an annotated `vX.Y.Z` tag.
+5. Builds and publishes the Docker image.
+6. Creates a GitHub Release for the tag.
+
+Published image tags:
 
 ```text
+ghcr.io/<owner>/<repo>:<version>
 ghcr.io/<owner>/<repo>:latest
 ```
+
+Automatic runs bump the minor version by default. Manual runs can choose
+`major`, `minor`, or `patch`.
 
 ## Environment
 
