@@ -1,7 +1,8 @@
 # C Chat Server
 
-Small TCP chat server written in C. It accepts arbitrary client payloads and
-broadcasts every received byte sequence to all other connected clients.
+Small TCP chat server written in C. It accepts arbitrary raw TCP payloads and
+`ws://` WebSocket clients on the same port, then broadcasts received messages to
+all other connected clients.
 
 ## Build
 
@@ -14,6 +15,18 @@ make
 ```sh
 CHAT_HOST=0.0.0.0 CHAT_PORT=5555 ./chat-server
 ```
+
+Raw TCP clients keep the original behavior. WebSocket clients can connect with:
+
+```js
+const ws = new WebSocket("ws://localhost:5555");
+ws.onmessage = (event) => console.log(event.data);
+ws.onopen = () => ws.send("hello from websocket");
+```
+
+The server implements the RFC 6455 HTTP upgrade handshake, masked client frames,
+text/binary broadcast frames, ping/pong, and close frames. TLS is not included,
+so use `ws://` rather than `wss://`.
 
 ## Test
 
