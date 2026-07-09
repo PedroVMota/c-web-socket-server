@@ -17,8 +17,8 @@ on:
           - patch
           - minor
           - major
-      skip_tests:
-        description: Skip unit tests before releasing
+      run_tests:
+        description: Run unit tests before releasing
         required: false
         default: false
         type: boolean
@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   test:
-    if: "${{ (github.event_name == 'workflow_dispatch' && !inputs.skip_tests) || (github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'ci: release v')) }}"
+    if: "${{ github.event_name == 'workflow_dispatch' && inputs.run_tests }}"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

@@ -55,7 +55,7 @@ docker run --rm -p 5555:5555 socket-server:latest
 
 The GitHub Actions release workflow:
 
-1. Runs `make clean && make test && make`.
+1. Runs `make clean && make test && make` only when manual input `run_tests` is enabled.
 2. Bumps `VERSION`.
 3. Updates `infra/manifests/deployment.yaml` to the new image tag.
 4. Commits the version bump and creates an annotated `vX.Y.Z` tag.
@@ -69,8 +69,8 @@ ghcr.io/<owner>/<repo>:<version>
 ghcr.io/<owner>/<repo>:latest
 ```
 
-Automatic runs bump the minor version by default. Manual runs can choose
-`major`, `minor`, or `patch`.
+Automatic runs bump the minor version by default and skip unit tests. Manual
+runs can choose `major`, `minor`, or `patch`, and can enable `run_tests`.
 
 ## Environment
 
