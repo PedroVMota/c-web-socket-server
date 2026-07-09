@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   test:
-    if: ${{ github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'ci: bump image version') }}
+    if: "${{ github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'ci: bump image version') }}"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
