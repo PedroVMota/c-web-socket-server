@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: c-web-socket-server
+  labels:
+    app.kubernetes.io/name: c-web-socket-server
+    app.kubernetes.io/part-of: iot-p3
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: c-web-socket-server
+  ports:
+    - name: tcp-chat
+      port: 5555
+      targetPort: tcp-chat
+      protocol: TCP

@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c-web-socket-server
+  labels:
+    app.kubernetes.io/name: c-web-socket-server
+    app.kubernetes.io/part-of: iot-p3
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c-web-socket-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c-web-socket-server
+        app.kubernetes.io/part-of: iot-p3
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        fsGroup: 101
+      containers:
+        - name: c-web-socket-server
+          image: ghcr.io/pedrovmota/c-web-socket-server:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: c-web-socket-server-config
+          ports:
+            - name: tcp-chat
+              containerPort: 5555
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: tcp-chat
+          livenessProbe:
+            tcpSocket:
+              port: tcp-chat
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
