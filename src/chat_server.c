@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <netdb.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -13,6 +14,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DEFAULT_HOST "0.0.0.0"
@@ -36,6 +38,46 @@ struct client {
   enum client_mode mode;
 };
 
+static const char *client_mode_name(enum client_mode mode) {
+  switch (mode) {
+    case CLIENT_RAW:
+      return "raw";
+    case CLIENT_WEBSOCKET:
+      return "websocket";
+    case CLIENT_UNKNOWN:
+    default:
+      return "unknown";
+  }
+}
+
+static void log_message(const char *level, const char *event, const char *fmt, ...) {
+  char timestamp[32];
+  time_t now = time(NULL);
+  struct tm tm_now;
+  FILE *stream = strcmp(level, "ERROR") == 0 || strcmp(level, "WARN") == 0 ? stderr : stdout;
+  va_list args;
+
+  if (now != (time_t)-1 && localtime_r(&now, &tm_now) != NULL) {
+    (void)strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S%z", &tm_now);
+  } else {
+    snprintf(timestamp, sizeof(timestamp), "time-unavailable");
+  }
+
+  fprintf(stream, "time=%s level=%s event=%s", timestamp, level, event);
+  if (fmt && fmt[0] != '\0') {
+    fputc(' ', stream);
+    va_start(args, fmt);
+    vfprintf(stream, fmt, args);
+    va_end(args);
+  }
+  fputc('\n', stream);
+  fflush(stream);
+}
+
+static void log_errno(const char *level, const char *event, const char *operation) {
+  log_message(level, event, "operation=%s errno=%d error=\"%s\"", operation, errno, strerror(errno));
+}
+
 static void handle_signal(int signo) {
   (void)signo;
   keep_running = 0;
@@ -58,7 +100,8 @@ static int env_int_or_default(const char *name, int fallback, int min, int max) 
   errno = 0;
   value = strtol(raw, &end, 10);
   if (errno != 0 || !end || *end != '\0' || value < min || value > max) {
-    fprintf(stderr, "Invalid %s=%s, using %d\n", name, raw, fallback);
+    log_message("WARN", "config_invalid", "name=%s value=\"%s\" fallback=%d min=%d max=%d", name, raw,
+                fallback, min, max);
     return fallback;
   }
 
@@ -84,7 +127,8 @@ static int create_listener(const char *host, const char *port, int backlog) {
 
   rc = getaddrinfo(host, port, &hints, &result);
   if (rc != 0) {
-    fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rc));
+    log_message("ERROR", "listener_resolve_failed", "host=%s port=%s error=\"%s\"", host, port,
+                gai_strerror(rc));
     return -1;
   }
 
@@ -95,7 +139,7 @@ static int create_listener(const char *host, const char *port, int backlog) {
     }
 
     if (set_reuseaddr(listener) < 0) {
-      perror("setsockopt SO_REUSEADDR");
+      log_errno("WARN", "listener_socket_option_failed", "setsockopt_so_reuseaddr");
       close(listener);
       listener = -1;
       continue;
@@ -105,7 +149,7 @@ static int create_listener(const char *host, const char *port, int backlog) {
       break;
     }
 
-    perror("bind");
+    log_errno("WARN", "listener_bind_failed", "bind");
     close(listener);
     listener = -1;
   }
@@ -117,7 +161,7 @@ static int create_listener(const char *host, const char *port, int backlog) {
   }
 
   if (listen(listener, backlog) < 0) {
-    perror("listen");
+    log_errno("ERROR", "listener_start_failed", "listen");
     close(listener);
     return -1;
   }
@@ -483,7 +527,8 @@ static bool write_client_payload(struct client *client, const unsigned char *dat
 
 static void disconnect_client(struct client *clients, int index) {
   if (clients[index].fd >= 0) {
-    printf("client disconnected: %s\n", clients[index].label);
+    log_message("INFO", "client_disconnected", "client=\"%s\" fd=%d mode=%s", clients[index].label,
+                clients[index].fd, client_mode_name(clients[index].mode));
     close(clients[index].fd);
     clients[index].fd = -1;
     clients[index].label[0] = '\0';
@@ -493,15 +538,24 @@ static void disconnect_client(struct client *clients, int index) {
 
 static void broadcast_to_peers(struct client *clients, int max_clients, int sender_index,
                                const unsigned char *data, size_t len, unsigned char websocket_opcode) {
+  int peer_count = 0;
+
   for (int i = 0; i < max_clients; i++) {
     if (i == sender_index || clients[i].fd < 0) {
       continue;
     }
+    peer_count++;
 
     if (!write_client_payload(&clients[i], data, len, websocket_opcode)) {
+      log_message("WARN", "client_write_failed", "client=\"%s\" fd=%d mode=%s bytes=%zu",
+                  clients[i].label, clients[i].fd, client_mode_name(clients[i].mode), len);
       disconnect_client(clients, i);
     }
   }
+
+  log_message("INFO", "message_broadcast", "sender=\"%s\" sender_fd=%d sender_mode=%s peers=%d bytes=%zu opcode=%u",
+              clients[sender_index].label, clients[sender_index].fd,
+              client_mode_name(clients[sender_index].mode), peer_count, len, websocket_opcode);
 }
 
 static void label_client(int fd, char *label, size_t label_len) {
@@ -526,7 +580,7 @@ static void accept_client(int listener, struct client *clients, int max_clients)
 
   if (client_fd < 0) {
     if (errno != EINTR) {
-      perror("accept");
+      log_errno("WARN", "client_accept_failed", "accept");
     }
     return;
   }
@@ -540,6 +594,8 @@ static void accept_client(int listener, struct client *clients, int max_clients)
 
   if (slot < 0) {
     static const char full[] = "server full\n";
+    log_message("WARN", "client_rejected", "reason=server_full fd=%d max_clients=%d", client_fd,
+                max_clients);
     (void)write_all(client_fd, (const unsigned char *)full, sizeof(full) - 1);
     close(client_fd);
     return;
@@ -548,7 +604,8 @@ static void accept_client(int listener, struct client *clients, int max_clients)
   clients[slot].fd = client_fd;
   clients[slot].mode = CLIENT_UNKNOWN;
   label_client(client_fd, clients[slot].label, sizeof(clients[slot].label));
-  printf("client connected: %s\n", clients[slot].label);
+  log_message("INFO", "client_connected", "client=\"%s\" fd=%d slot=%d", clients[slot].label,
+              clients[slot].fd, slot);
 }
 
 static bool handle_websocket_frame(struct client *clients, int max_clients, int sender_index,
@@ -572,6 +629,8 @@ static bool handle_websocket_frame(struct client *clients, int max_clients, int 
     payload_len = data[pos + 1] & 0x7FU;
 
     if ((data[pos] & 0x70U) != 0 || !masked) {
+      log_message("WARN", "websocket_frame_rejected", "client=\"%s\" fd=%d reason=invalid_flags_or_unmasked",
+                  clients[sender_index].label, clients[sender_index].fd);
       return false;
     }
 
@@ -593,6 +652,9 @@ static bool handle_websocket_frame(struct client *clients, int max_clients, int 
     }
 
     if (payload_len > sizeof(payload) || len - pos < header_len + 4 + payload_len) {
+      log_message("WARN", "websocket_frame_rejected", "client=\"%s\" fd=%d reason=invalid_payload_length payload_len=%llu",
+                  clients[sender_index].label, clients[sender_index].fd,
+                  (unsigned long long)payload_len);
       return false;
     }
 
@@ -604,13 +666,19 @@ static bool handle_websocket_frame(struct client *clients, int max_clients, int 
     if (opcode == 0x1 || opcode == 0x2) {
       broadcast_to_peers(clients, max_clients, sender_index, payload, (size_t)payload_len, opcode);
     } else if (opcode == 0x8) {
+      log_message("INFO", "websocket_close_received", "client=\"%s\" fd=%d bytes=%zu",
+                  clients[sender_index].label, clients[sender_index].fd, (size_t)payload_len);
       (void)write_websocket_frame(clients[sender_index].fd, 0x8, payload, (size_t)payload_len);
       return false;
     } else if (opcode == 0x9) {
+      log_message("INFO", "websocket_ping_received", "client=\"%s\" fd=%d bytes=%zu",
+                  clients[sender_index].label, clients[sender_index].fd, (size_t)payload_len);
       if (!write_websocket_frame(clients[sender_index].fd, 0xA, payload, (size_t)payload_len)) {
         return false;
       }
     } else if (opcode != 0xA) {
+      log_message("WARN", "websocket_frame_rejected", "client=\"%s\" fd=%d reason=unsupported_opcode opcode=%u",
+                  clients[sender_index].label, clients[sender_index].fd, opcode);
       return false;
     }
 
@@ -625,13 +693,19 @@ static bool handle_client_data(struct client *clients, int max_clients, int inde
   if (clients[index].mode == CLIENT_UNKNOWN) {
     if (is_websocket_handshake(data, len)) {
       if (!send_websocket_handshake(clients[index].fd, data, len)) {
+        log_message("WARN", "websocket_upgrade_failed", "client=\"%s\" fd=%d", clients[index].label,
+                    clients[index].fd);
         return false;
       }
       clients[index].mode = CLIENT_WEBSOCKET;
+      log_message("INFO", "client_protocol_selected", "client=\"%s\" fd=%d mode=websocket",
+                  clients[index].label, clients[index].fd);
       return true;
     }
 
     clients[index].mode = CLIENT_RAW;
+    log_message("INFO", "client_protocol_selected", "client=\"%s\" fd=%d mode=raw",
+                clients[index].label, clients[index].fd);
   }
 
   if (clients[index].mode == CLIENT_WEBSOCKET) {
@@ -647,7 +721,7 @@ static int serve(int listener, int max_clients, int buffer_size) {
   unsigned char *buffer = malloc((size_t)buffer_size);
 
   if (!clients || !buffer) {
-    perror("alloc");
+    log_errno("ERROR", "server_alloc_failed", "alloc");
     free(clients);
     free(buffer);
     return 1;
@@ -680,7 +754,7 @@ static int serve(int listener, int max_clients, int buffer_size) {
       if (errno == EINTR) {
         continue;
       }
-      perror("select");
+      log_errno("ERROR", "server_select_failed", "select");
       break;
     }
 
@@ -698,6 +772,7 @@ static int serve(int listener, int max_clients, int buffer_size) {
       nread = recv(clients[i].fd, buffer, (size_t)buffer_size, 0);
       if (nread < 0) {
         if (errno != EINTR) {
+          log_errno("WARN", "client_read_failed", "recv");
           disconnect_client(clients, i);
         }
         continue;
@@ -738,11 +813,12 @@ int main(void) {
     return 1;
   }
 
-  printf("chat server listening on %s:%s\n", host, port);
-  printf("max_clients=%d backlog=%d buffer_size=%d\n", max_clients, backlog, buffer_size);
-  fflush(stdout);
+  log_message("INFO", "server_started",
+              "host=%s port=%s max_clients=%d backlog=%d buffer_size=%d websocket=true raw_tcp=true",
+              host, port, max_clients, backlog, buffer_size);
 
   int rc = serve(listener, max_clients, buffer_size);
+  log_message("INFO", "server_stopped", "exit_code=%d", rc);
   close(listener);
   return rc;
 }

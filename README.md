@@ -28,6 +28,18 @@ The server implements the RFC 6455 HTTP upgrade handshake, masked client frames,
 text/binary broadcast frames, ping/pong, and close frames. TLS is not included,
 so use `ws://` rather than `wss://`.
 
+## Logs
+
+Application logs are emitted as single-line key/value records:
+
+```text
+time=2026-07-09T11:52:57+0100 level=INFO event=server_started host=0.0.0.0 port=5555 max_clients=64 backlog=16 buffer_size=4096 websocket=true raw_tcp=true
+```
+
+Common events include `server_started`, `client_connected`,
+`client_protocol_selected`, `message_broadcast`, `client_disconnected`, and
+`websocket_frame_rejected`.
+
 ## Test
 
 ```sh
