@@ -1,0 +1,6 @@
+apiVersion: v2
+name: c-web-socket-server
+description: TCP chat server for the Inception of Things P3 workload.
+type: application
+version: 0.1.0
+appVersion: "latest"
