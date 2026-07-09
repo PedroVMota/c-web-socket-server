@@ -23,7 +23,7 @@ spec:
         fsGroup: 101
       containers:
         - name: c-web-socket-server
-          image: ghcr.io/pedrovmota/c-web-socket-server:0.3.0
+          image: ghcr.io/pedrovmota/c-web-socket-server:0.4.0
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
