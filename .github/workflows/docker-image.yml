@@ -6,6 +6,9 @@ on:
       - main
       - master
       - origin
+    paths-ignore:
+      - ".github/**"
+      - "infra/manifests/**"
   workflow_dispatch:
     inputs:
       version_bump:
