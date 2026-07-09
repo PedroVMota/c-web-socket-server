@@ -5,14 +5,16 @@ on:
     branches:
       - main
       - master
+      - origin
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
   test:
+    if: ${{ github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'ci: bump image version') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -24,9 +26,53 @@ jobs:
       - name: Run unit tests
         run: make test
 
-  publish:
+  version:
     runs-on: ubuntu-latest
     needs: test
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump minor version
+        id: bump
+        run: |
+          set -euo pipefail
+
+          current_version="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$current_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Invalid VERSION: $current_version" >&2
+            exit 1
+          fi
+
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          next_version="${major}.$((minor + 1)).0"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:${next_version}"
+
+          printf '%s\n' "$next_version" > VERSION
+          sed -i -E "s#image: ghcr.io/[^[:space:]]+#image: ${image}#" infra/manifests/deployment.yaml
+
+          echo "version=$next_version" >> "$GITHUB_OUTPUT"
+
+      - name: Commit version bump
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add VERSION infra/manifests/deployment.yaml
+          git commit -m "ci: bump image version to ${{ steps.bump.outputs.version }}"
+          git push
+
+  publish:
+    runs-on: ubuntu-latest
+    needs:
+      - test
+      - version
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,9 +90,11 @@ jobs:
       - name: Prepare image name
         run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
-      - name: Build and push latest image
+      - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ env.IMAGE_NAME }}:latest
+          tags: |
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.version }}
+            ghcr.io/${{ env.IMAGE_NAME }}:latest
