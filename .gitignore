@@ -2,3 +2,4 @@ chat-server
 unit-tests
 *.o
 *.log
+ci.sh
